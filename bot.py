@@ -1,8 +1,9 @@
 import os
 import logging
 import requests
+import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Configure logging
 logging.basicConfig(
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Get the bot token from environment variables
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TOKEN:
+    logger.error("TELEGRAM_TOKEN environment variable is not set!")
     raise ValueError("TELEGRAM_TOKEN environment variable is not set!")
 
 # Pollinations.ai API endpoint for image generation
@@ -67,8 +69,11 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Build the Pollinations API URL with the prompt
-        # The prompt is URL-encoded automatically by requests
-        api_url = f"{POLLINATIONS_API}{prompt}?width=512&height=768&nologo=true"
+        import urllib.parse
+        encoded_prompt = urllib.parse.quote(prompt)
+        api_url = f"{POLLINATIONS_API}{encoded_prompt}?width=512&height=768&nologo=true"
+
+        logger.info(f"Generating image for prompt: {prompt}")
 
         # Send the GET request to generate the image
         response = requests.get(api_url, timeout=60)
@@ -82,13 +87,16 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=response.content,
                 caption=f"🖼️ Generated from: \"{prompt}\""
             )
+            logger.info(f"Successfully generated image for: {prompt}")
         else:
             await status_msg.edit_text(
-                f"❌ Sorry, something went wrong generating your image. Please try again later."
+                f"❌ Sorry, something went wrong (Status: {response.status_code}). Please try again later."
             )
+            logger.error(f"API error: {response.status_code} - {response.text}")
 
     except requests.exceptions.Timeout:
         await status_msg.edit_text("⏰ The image generation took too long. Please try again.")
+        logger.error("Image generation timeout")
     except Exception as e:
         logger.error(f"Error generating image: {e}")
         await status_msg.edit_text("❌ An error occurred. Please try again later.")
@@ -102,22 +110,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Use the same generate function
     await generate_image(update, context)
 
-def main():
+async def main():
     """Main function to run the bot."""
-    # Create the application
-    application = ApplicationBuilder().token(TOKEN).build()
+    try:
+        # Create the application
+        application = Application.builder().token(TOKEN).build()
 
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("generate", generate_image))
+        # Add command handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("generate", generate_image))
 
-    # Add handler for all text messages
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        # Add handler for all text messages (except commands)
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Start the bot with long polling
-    logger.info("Starting bot with long polling...")
-    application.run_polling()
+        # Start the bot with long polling
+        logger.info("🚀 Starting Bimgs AI Bot...")
+        logger.info(f"Bot token: {TOKEN[:10]}...")  # Log first 10 chars for debugging
+        
+        # Initialize the application (new in v21+)
+        await application.initialize()
+        
+        # Start polling
+        await application.start()
+        await application.updater.start_polling()
+        
+        logger.info("✅ Bot is running and waiting for messages!")
+        
+        # Keep the bot running
+        while True:
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}")
+        raise
 
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
